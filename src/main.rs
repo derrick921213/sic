@@ -53,7 +53,15 @@ fn main() -> io::Result<()> {
                             if let FormatDirective::Format(Format::FMT3_4) = obj.fmt {
                                 formatter = FormatDirective::Format(Format::FMT4);
                             } else {
-                                formatter = obj.fmt.clone();
+                                // formatter = obj.fmt.clone();
+                                return Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!(
+                                        "Line {}: {} Can't be used with extended format",
+                                        index + 1,
+                                        &opcode
+                                    ),
+                                ));
                             }
                         }
                         if obj.code == 0x107 {
