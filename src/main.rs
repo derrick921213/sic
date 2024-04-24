@@ -24,6 +24,7 @@ impl FileWriter {
 fn main() -> io::Result<()> {
     let mut args = std::env::args();
     let program = args.next().unwrap();
+    let mut base_register: u32 = 0;
     match args.next() {
         Some(filename) => {
             let file = File::open(filename)?;
@@ -48,6 +49,9 @@ fn main() -> io::Result<()> {
                 let mut tokens = line.split(['\t', ',']).collect::<Vec<&str>>();
                 if tokens.len() > 3 {
                     tokens.truncate(3);
+                }
+                if let Some(symbol) = symbol_table.get(tokens[1]) {
+                    base_register = *symbol;
                 }
                 if tokens[0].is_empty() && tokens[1] == "RSUB" {
                     tokens.append(&mut vec![""]);
@@ -153,7 +157,7 @@ fn main() -> io::Result<()> {
             // =========
             // for line in line_struct.iter() {
             //     println!(
-            //         "{:06X}\t{:8}\t{:8}\t{:8}",
+            //         "{:06}\t{:8}\t{:8}\t{:8}",
             //         line.get_memory(),
             //         line.get_symbol().unwrap_or(&"".to_string()),
             //         line.get_op(),
@@ -166,7 +170,7 @@ fn main() -> io::Result<()> {
             // }
             // println!("{:#?}", line_struct);
             // =========
-            pass2(&line_struct, &symbol_table, total)?;
+            pass2(&line_struct, &symbol_table, total, base_register)?;
         }
         None => println!("Usage: {} <filename.asm>", program),
     }
@@ -179,6 +183,7 @@ fn pass2(
     line_struct: &[Line],
     symbol_table: &HashMap<String, u32>,
     total_len: u32,
+    base_register: u32,
 ) -> io::Result<()> {
     let mut file_writer = FileWriter::new("output.txt")?;
     let mut end_address = 0x0;
@@ -201,12 +206,10 @@ fn pass2(
     let mut text_record = String::new();
     let mut text_record_length = 0;
     let mut start_address = 0;
-
     for line in line_struct.iter() {
         if let FormatDirective::Format(Format::FMT0) = line.get_fmt() {
             continue;
         }
-
         let mut object_code = String::new();
         let ni = match line.get_address_mode() {
             AddrMode::Simple => 0x3,
@@ -219,45 +222,30 @@ fn pass2(
         } else {
             0x0
         };
-
-        match line.get_fmt() {
-            FormatDirective::Format(Format::FMT1) => {
-                object_code = format!("{:02X}", line.get_code());
-            }
-            FormatDirective::Format(Format::FMT2) => {
-                let r1 = line
-                    .get_operand1()
-                    .map_or(0, |op| symbol_table.get(op).copied().unwrap_or(0) as u16);
-                let r2 = line
-                    .get_operand2()
-                    .map_or(0, |op| symbol_table.get(op).copied().unwrap_or(0) as u16);
-                object_code = format!("{:02X}{:1X}{:1X}", line.get_code(), r1, r2);
-            }
-            FormatDirective::Format(Format::FMT3_4) => {
-                let extended = matches!(line.get_fmt(), FormatDirective::Format(Format::FMT4));
-                let pc = line.get_memory() + if extended { 4 } else { 3 };
-                let mut displacement = 0;
-                if let Some(symbol) = line.get_operand1() {
-                    if let Some(&address) = symbol_table.get(symbol) {
-                        displacement = if extended {
-                            address
-                        } else {
-                            address.wrapping_sub(pc) & 0xFFF
-                        };
-                    } else {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("Undefined symbol {}", symbol),
-                        ));
-                    }
+        let extended = matches!(line.get_fmt(), FormatDirective::Format(Format::FMT4));
+        let pc = line.get_memory() + if extended { 4 } else { 3 };
+        let mut displacement = 0;
+        let mut xbpe = if extended { 0x1 } else { 0x2 };
+        if let Some(symbol) = line.get_operand1() {
+            if let Some(&address) = symbol_table.get(symbol) {
+                let pc_relative = address.wrapping_sub(pc) & 0xFFF;
+                let base_relative_disp = address.wrapping_sub(base_register) & 0xFFF;
+                if pc_relative > 2048 && base_relative_disp <= 2048 {
+                    displacement = base_relative_disp as i32;
+                    xbpe |= 0x4;
+                } else {
+                    displacement = pc_relative as i32;
                 }
-                let mut xbpe = if extended { 0x1 } else { 0x2 };
-                xbpe |= x_bit;
-                let opcode = line.get_code() as u32;
-                object_code = format!("{:02X}{:01X}{:03X}", opcode, ni << 4 | xbpe, displacement);
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Undefined symbol {}", symbol),
+                ));
             }
-            _ => {}
         }
+        xbpe |= x_bit;
+        let opcode = line.get_code() as u32;
+        object_code = format!("{:02X}{:01X}{:03X}", opcode, ni << 4 | xbpe, displacement);
 
         if text_record_length + object_code.len() / 2 > 30 {
             file_writer.write(&format!(
